@@ -16,4 +16,5 @@ RUN pip install --no-cache-dir \
     ipywidgets \
     scipy \
     argparse \
-    openpyxl
+    openpyxl \ 
+    pytest
