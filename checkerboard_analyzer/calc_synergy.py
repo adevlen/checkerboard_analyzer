@@ -13,9 +13,9 @@ class Synergy:
         Initializes an instance of the Synergy class. 
         
         Args:
-            parsed_data: dictionary containing single drug arrays and combination matrices
-            drug1_baseline: instance of DoseResponseCurve class for drug 1
-            drug2_baseline: instance of DoseResponseCurve class for drug 2
+            parsed_data: dictionary containing single drug arrays and combination matrices.
+            drug1_baseline: instance of DoseResponseCurve class for drug 1.
+            drug2_baseline: instance of DoseResponseCurve class for drug 2.
         '''
         self.data = parsed_data
         self.curve_drug1 = drug1_baseline
@@ -84,17 +84,19 @@ class Synergy:
         # eval Loewe eqn to get combination matrix
         # CI = d1/D1 + d2/D2
         CI = (drug1_conc_2D / D1) + (drug2_conc_2D / D2)
-        raw_loewe = 1 - CI # Loewe synergy score
+        self.loewe_scores = 1 - CI # Loewe synergy score
 
-        # if(np.any((raw_loewe > 1.0) | (raw_loewe < -1.0))):
-        #     self.loewe_scores = np.clip(raw_loewe, -1.0, 1.0)
-        #     print("Warning: Encountered Loewe scores > 1.0 or < -1.0. Clipping values to range (-1.0, 1.0).")
-        # else:
-        #     self.loewe_scores = raw_loewe
-        self.loewe_scores = raw_loewe
-        
-    # change to plot only one heatmap at a time
+
     def plot_synergy_heatmaps(self, assay_info, output_dir, synergy_model='both'):
+        '''
+        Plots synergy scores as a heatmap (drug 1 concentration vs drug 2 concentration).
+        Saves heatmaps as PNG files in the given output directory.
+
+        Args:
+            assay_info: dictionary containing assay information (drug names, concentration units, cell line).
+            output_dir: Path variable specifying the location to save the heatmaps.
+            synergy_model: str specifying the synergy model (Bliss, Loewe, or both).
+        '''
 
         drug1_name = assay_info['drug1_name']
         drug2_name = assay_info['drug2_name']

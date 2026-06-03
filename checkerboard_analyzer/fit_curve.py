@@ -1,5 +1,5 @@
 '''
-Code to model single drug response using the Hill equation and plot the resulting 4-parameter logistic curve.
+Code to model single drug response using the 4PL Hill equation and plot the resulting dose-response curve.
 '''
 
 import pandas as pd
@@ -23,7 +23,8 @@ class DoseResponseCurve:
         self.concentrations = np.asarray(concentrations)
         self.responses = np.asarray(responses)
         self.units = units
-        self.params = {}
+        self.params = {} # curve fit parameters (Emin, Emax, EC50, h)
+
 
     def initial_guesses(self):
         ''' 
@@ -78,15 +79,16 @@ class DoseResponseCurve:
         
         Args:
             x: NumPy array of concentration values.
-            Emin: The minimum drug response.
-            Emax: The maximum drug response.
-            EC50: The concentration of the drug that gives a response halfway between Emin and Emax.
-            h: The steepness of the dose-response curve (Hill slope).
+            Emin: the minimum drug response.
+            Emax: the maximum drug response.
+            EC50: the concentration of the drug that gives a response halfway between Emin and Emax.
+            h: the steepness of the dose-response curve (Hill slope).
 
         Returns:
             The drug response for the given concentrations and parameters.
         '''
         return Emin + (Emax - Emin) / (1.0 + (x / EC50)**h)
+    
     
     def curve_fit(self):
         ''' 
@@ -102,6 +104,7 @@ class DoseResponseCurve:
         lower_bounds = [0.0, 0.85, min_tested * 0.01, 0.2]
         upper_bounds = [0.4, 1.20, np.max(self.concentrations) * 10, 5.0]
 
+        # ordinary least squares regression
         try:
             popt, _ = curve_fit(self._hill_equation, 
                                 self.concentrations, 
@@ -121,9 +124,13 @@ class DoseResponseCurve:
             print(f"Curve fitting failed to converge. Error: {e}")
             self.params = None
 
+
     def predict(self, x):
         ''' 
         Predict responses for given concentrations using the fitted 4PL model. 
+
+        Args:
+            x: the concentration(s) to predict a response for.
 
         Returns:
             The drug response for the given concentrations and parameters.
@@ -139,6 +146,7 @@ class DoseResponseCurve:
                 self.params["h"]
             )
 
+
     def inverse_predict(self, response):
         ''' 
         Calculates drug concentration based on response. 
@@ -147,7 +155,7 @@ class DoseResponseCurve:
             response: NumPy array of response values as percentages.
 
         Returns:
-            The drug concentration for the given responses.
+            precdicted doses: the drug concentrations for the given responses.
         '''
         if self.params is None:
             raise ValueError("DoseResponseCurve instance has not yet been fit.")
@@ -177,6 +185,7 @@ class DoseResponseCurve:
         predicted_doses = ec50 * (second_term ** (1.0 / h_val))
         return predicted_doses
         
+
     def get_stats(self):
         ''' 
         Groups technical replicates ahead of plotting dose-response curve. 
@@ -198,12 +207,14 @@ class DoseResponseCurve:
         df_stats['sd_response'] = df_stats['sd_response'].fillna(0.0)
         return df_stats
 
+
     def plot_curve(self, drug_name, output_dir):
         ''' 
         Plots the dose-response curve (% response vs log concentration) and reports the EC50 in the title. 
         
         Args: 
-            drug_name: Name of the drug for which dose-response curve is to be plotted for.
+            drug_name: name of the drug for which dose-response curve is to be plotted for.
+            output_dir: Path variable specifying the location to save the plots.
         '''
         if self.params is None:
             raise ValueError("DoseResponseCurve instance has not yet been fit.")
@@ -245,12 +256,14 @@ class DoseResponseCurve:
         curve_dir.mkdir(parents=True, exist_ok=True)
         plt.savefig(curve_dir / f"{drug_name}_dose_response.png") 
 
+
     def save_params(self, drug_name, output_dir):
         '''
-        Writes parameters (Emin, Emax, EC50, h) to an Excel file in outputs/parameters for both drugs tested.
+        Writes parameters (Emin, Emax, EC50, h) to an Excel file in outputs/parameters for the given drug.
 
         Args:
-            params: Dictionary containing Drug 1 and Drug 2 params dictionaries.
+            drug_name: name of the drug to save curve fit parameters for.
+            output_dir: Path variable specifying the location to save the Excel file.
         '''
         params_dir = output_dir / "parameters"
         params_dir.mkdir(parents=True, exist_ok=True)
