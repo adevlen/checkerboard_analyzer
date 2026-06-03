@@ -15,4 +15,5 @@ RUN pip install --no-cache-dir \
     seaborn \
     ipywidgets \
     scipy \
-    argparse 
+    argparse \
+    openpyxl
