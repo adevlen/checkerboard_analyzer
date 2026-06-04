@@ -21,4 +21,5 @@ jobs:
 
       - name: Run Test Suite in Container
         run: |
-          docker run --rm checkerboard_container pytest -v tests/tests.py
+          cd .devcontainer
+          docker run --rm checkerboard_container pytest -v ../tests/tests.py
