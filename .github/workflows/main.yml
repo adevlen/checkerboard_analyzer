@@ -1,0 +1,23 @@
+on:
+  push:
+    branches:
+      '**'
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Run Test Suite
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: |
+          docker build -t checkerboard_container .
+
+      - name: Run Test Suite in Container
+        run: |
+          docker run --rm checkerboard_container pytest -v tests/tests.py

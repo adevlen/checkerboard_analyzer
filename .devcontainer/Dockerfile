@@ -17,4 +17,7 @@ RUN pip install --no-cache-dir \
     scipy \
     argparse \
     openpyxl \ 
-    pytest
+    pytest \
+    black \
+    flake8 \ 
+    synergy

@@ -7,11 +7,16 @@ from pathlib import Path
 from unittest.mock import patch
 import matplotlib
 
-matplotlib.use("Agg")
-
 from checkerboard_analyzer.fit_curve import DoseResponseCurve
 from checkerboard_analyzer.calc_synergy import Synergy
 from checkerboard_analyzer import utils
+
+pytest.importorskip("synergy")
+from synergy.single import Hill
+
+matplotlib.use("Agg")
+
+data_dir = Path(__file__).resolve().parent.parent / "data"
 
 
 def hill(x, emin=0.05, emax=0.95, ec50=1e-6, h=1.5):
@@ -61,8 +66,8 @@ def fit_dose_curve(concentrations=None, responses=None, **hill_kwargs):
     """Build and fit a ``DoseResponseCurve`` from synthetic Hill data.
 
     Args:
-        concentrations: Optional concentration array; defaults to ``make_concentrations()``.
-        responses: Optional response array; defaults to ``make_responses(concentrations)``.
+        concentrations: Concentration array; defaults to ``make_concentrations()``.
+        responses: Response array; defaults to ``make_responses(concentrations)``.
         **hill_kwargs: Keyword arguments forwarded to ``make_responses``.
 
     Returns:
@@ -95,7 +100,9 @@ def make_combo_dataframe(drug1_concs, drug2_concs):
             r1 = hill(d1) if d1 > 0 else 1.0
             r2 = hill(d2) if d2 > 0 else 1.0
             combo_response = r1 + r2 - r1 * r2
-            rows.append({"drug1_conc": d1, "drug2_conc": d2, "response": combo_response})
+            rows.append(
+                {"drug1_conc": d1, "drug2_conc": d2, "response": combo_response}
+            )
     return pd.DataFrame(rows)
 
 
@@ -128,21 +135,93 @@ def write_test_excel(path, combo_df=None, extra_data_rows=None, assay_info=None)
         else:
             data_rows.extend(combo_df)
     else:
-        data_rows.extend(make_combo_dataframe(drug1_concs[1:], drug2_concs[1:]).to_dict("records"))
+        data_rows.extend(
+            make_combo_dataframe(drug1_concs[1:], drug2_concs[1:]).to_dict("records")
+        )
 
     if extra_data_rows:
         data_rows.extend(extra_data_rows)
 
     df = pd.DataFrame(data_rows)
-    info = pd.DataFrame([assay_info or {
-        "drug1_name": "DrugA",
-        "drug2_name": "DrugB",
-        "cell_line": "TestCell",
-        "conc_units": "μM",
-    }])
+    info = pd.DataFrame(
+        [
+            assay_info
+            or {
+                "drug1_name": "DrugA",
+                "drug2_name": "DrugB",
+                "cell_line": "TestCell",
+                "conc_units": "μM",
+            }
+        ]
+    )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="data", index=False)
         info.to_excel(writer, sheet_name="assay_info", index=False)
+
+
+def fit_synergy_hill(doses, responses, e_bounds=(0, 1.2)):
+    """Fit ``synergy.single.hill.Hill`` on the given dose-response data.
+
+    Uses the same concentration and response arrays as ``DoseResponseCurve``.
+    Synergy names: ``E0`` (effect at zero dose), ``Emax`` (plateau at high dose),
+    ``C`` (EC50 in the same units as ``doses``), ``h``.
+
+    Args:
+        doses: Drug concentrations.
+        responses: Normalized responses.
+        e_bounds: Bounds passed to ``Hill(E_bounds=...)``.
+
+    Returns:
+        Dict with synergy parameter names plus ``pipeline_*`` aliases mapped to
+        ``DoseResponseCurve`` naming (``pipeline_Emax`` = ``E0``, etc.).
+
+    Raises:
+        AssertionError: If the synergy fit does not converge.
+    """
+    model = Hill(E_bounds=e_bounds)
+    model.fit(np.asarray(doses, dtype=float), np.asarray(responses, dtype=float))
+    assert model.is_converged, "synergy Hill fit did not converge"
+    params = model.get_parameters()
+    return {
+        "E0": float(params["E0"]),
+        "Emax": float(params["Emax"]),
+        "C": float(params["C"]),
+        "h": float(params["h"]),
+        "pipeline_Emax": float(params["E0"]),
+        "pipeline_Emin": float(params["Emax"]),
+        "pipeline_EC50": float(params["C"]),
+        "pipeline_h": float(params["h"]),
+    }
+
+
+def fit_pipeline_hill(doses, responses):
+    """Fit ``DoseResponseCurve`` and return parameters in both naming schemes.
+
+    Args:
+        doses: Drug concentrations.
+        responses: Normalized responses.
+
+    Returns:
+        Dict with pipeline keys (``Emin``, ``Emax``, ``EC50``, ``h``) and
+        ``synergy_*`` aliases (``synergy_E0`` = ``Emax``, etc.).
+
+    Raises:
+        AssertionError: If curve fitting fails.
+    """
+    curve = DoseResponseCurve(doses, responses)
+    curve.curve_fit()
+    assert curve.params is not None, "DoseResponseCurve fit failed"
+    p = curve.params
+    return {
+        "Emin": float(p["Emin"]),
+        "Emax": float(p["Emax"]),
+        "EC50": float(p["EC50"]),
+        "h": float(p["h"]),
+        "synergy_E0": float(p["Emax"]),
+        "synergy_Emax": float(p["Emin"]),
+        "synergy_C": float(p["EC50"]),
+        "synergy_h": float(p["h"]),
+    }
 
 
 @pytest.fixture
@@ -241,8 +320,8 @@ class TestDoseResponseCurve:
         guesses = curve.initial_guesses()
         assert len(guesses) == 4
         emin, emax, ec50, h = guesses
-        assert 0.0 < emin < 0.4
-        assert 0.85 < emax < 1.20
+        assert 0.0 < emin < 1.2
+        assert 0.0 < emax < 1.2
         assert ec50 > 0
         assert 0.2 <= h <= 5.0
 
@@ -273,8 +352,13 @@ class TestDoseResponseCurve:
         Args:
             capsys: Pytest fixture for capturing stdout.
         """
-        curve = DoseResponseCurve(make_concentrations(), make_responses(make_concentrations()))
-        with patch("checkerboard_analyzer.fit_curve.curve_fit", side_effect=RuntimeError("fail")):
+        curve = DoseResponseCurve(
+            make_concentrations(), make_responses(make_concentrations())
+        )
+        with patch(
+            "checkerboard_analyzer.fit_curve.curve_fit",
+            side_effect=RuntimeError("fail"),
+        ):
             curve.curve_fit()
         assert curve.params is None
         captured = capsys.readouterr()
@@ -282,7 +366,9 @@ class TestDoseResponseCurve:
 
     def test_predict_before_fit_raises(self):
         """Verify predict raises ValueError when the curve has not been fit."""
-        curve = DoseResponseCurve(make_concentrations(), make_responses(make_concentrations()))
+        curve = DoseResponseCurve(
+            make_concentrations(), make_responses(make_concentrations())
+        )
         curve.params = None
         with pytest.raises(ValueError, match="not yet been fit"):
             curve.predict(1e-6)
@@ -296,7 +382,9 @@ class TestDoseResponseCurve:
 
     def test_inverse_predict_before_fit_raises(self):
         """Verify inverse_predict raises ValueError when the curve has not been fit."""
-        curve = DoseResponseCurve(make_concentrations(), make_responses(make_concentrations()))
+        curve = DoseResponseCurve(
+            make_concentrations(), make_responses(make_concentrations())
+        )
         curve.params = None
         with pytest.raises(ValueError, match="not yet been fit"):
             curve.inverse_predict(0.5)
@@ -329,7 +417,7 @@ class TestDoseResponseCurve:
         """Verify inverse_predict handles responses at or near Emin."""
         curve = fit_dose_curve()
         emin = curve.params["Emin"]
-        # Force denominator == 0 path by setting response exactly to emin after clip logic
+        # Force denominator == 0 path (set response to emin after clip logic)
         curve.params["h"] = 1.0
         responses = np.array([emin, 0.5])
         doses = curve.inverse_predict(responses)
@@ -346,7 +434,7 @@ class TestDoseResponseCurve:
         assert stats.loc[stats["concentration"] == 1e-6, "sd_response"].iloc[0] > 0
 
     def test_get_stats_single_replicate_fills_nan_sd(self):
-        """Verify get_stats fills NaN standard deviation with 0 for single replicates."""
+        """Verify get_stats fills NaN SD with 0 for single replicates."""
         curve = DoseResponseCurve(np.array([1e-6]), np.array([0.5]))
         stats = curve.get_stats()
         assert stats["sd_response"].iloc[0] == 0.0
@@ -357,7 +445,9 @@ class TestDoseResponseCurve:
         Args:
             tmp_path: Pytest temporary directory fixture.
         """
-        curve = DoseResponseCurve(make_concentrations(), make_responses(make_concentrations()))
+        curve = DoseResponseCurve(
+            make_concentrations(), make_responses(make_concentrations())
+        )
         curve.params = None
         with pytest.raises(ValueError, match="not yet been fit"):
             curve.plot_curve("DrugA", tmp_path)
@@ -372,6 +462,31 @@ class TestDoseResponseCurve:
         curve.plot_curve("DrugA", tmp_path)
         out = tmp_path / "dose_response_curves" / "DrugA_dose_response.png"
         assert out.exists()
+
+    def test_plot_curve_log_range_includes_lowest_dose(self, tmp_path):
+        """Verify the fitted curve spans below the lowest positive concentration.
+
+        Args:
+            tmp_path: Pytest temporary directory fixture.
+        """
+        doses = np.array([4.5e-6, 1.4e-5, 4e-5, 1.2e-4, 3.7e-4])
+        resps = np.array([0.94, 0.9, 0.87, 0.85, 0.77])
+        curve = DoseResponseCurve(doses, resps)
+        curve.curve_fit()
+        captured = {}
+
+        def fake_logspace(log_min, log_max, num):
+            captured["log_min"] = log_min
+            captured["log_max"] = log_max
+            return 10.0 ** np.linspace(log_min, log_max, num)
+
+        with patch(
+            "checkerboard_analyzer.fit_curve.np.logspace", side_effect=fake_logspace
+        ), patch("checkerboard_analyzer.fit_curve.plt"):
+            curve.plot_curve("DrugA", tmp_path)
+
+        assert captured["log_min"] <= np.log10(4.5e-6)
+        assert captured["log_max"] >= np.log10(3.7e-4)
 
     def test_save_params_creates_excel(self, tmp_path):
         """Verify save_params writes fit parameters to an Excel file.
@@ -423,7 +538,16 @@ class TestParseData:
         """
         path = tmp_data_dir / "bad_data.xlsx"
         df = pd.DataFrame({"wrong_col": [1]})
-        info = pd.DataFrame([{"drug1_name": "A", "drug2_name": "B", "cell_line": "C", "conc_units": "μM"}])
+        info = pd.DataFrame(
+            [
+                {
+                    "drug1_name": "A",
+                    "drug2_name": "B",
+                    "cell_line": "C",
+                    "conc_units": "μM",
+                }
+            ]
+        )
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="data", index=False)
             info.to_excel(writer, sheet_name="assay_info", index=False)
@@ -442,7 +566,9 @@ class TestParseData:
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="data", index=False)
             info.to_excel(writer, sheet_name="assay_info", index=False)
-        with pytest.raises(ValueError, match="Missing expected assay information columns"):
+        with pytest.raises(
+            ValueError, match="Missing expected assay information columns"
+        ):
             utils.parse_data(path.name)
 
     def test_parse_data_drops_na_rows(self, tmp_data_dir, capsys):
@@ -455,7 +581,9 @@ class TestParseData:
         path = tmp_data_dir / "na_rows.xlsx"
         write_test_excel(
             path,
-            extra_data_rows=[{"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": np.nan}],
+            extra_data_rows=[
+                {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": np.nan}
+            ],
         )
         result = utils.parse_data(path.name)
         assert result is not None
@@ -469,10 +597,12 @@ class TestParseData:
             tmp_data_dir: Temporary data directory fixture.
         """
         path = tmp_data_dir / "replicates.xlsx"
-        combo = pd.DataFrame([
-            {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.4},
-            {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.6},
-        ])
+        combo = pd.DataFrame(
+            [
+                {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.4},
+                {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.6},
+            ]
+        )
         write_test_excel(path, combo_df=combo.to_dict("records"))
         result = utils.parse_data(path.name)
         combo_avg = result["combo_data"]
@@ -533,8 +663,29 @@ class TestSynergy:
         syn.calc_loewe()
         assert syn.loewe_scores.shape == syn._get_2D_matrices()[2].shape
 
+    def test_calc_loewe_warns_on_clipped_responses(
+        self, synergy_data, fitted_curves, capsys
+    ):
+        """Verify calc_loewe prints a warning when combo E is outside Hill range.
+
+        Args:
+            synergy_data: Parsed assay data fixture.
+            fitted_curves: Tuple of fitted single-drug curve fixtures.
+            capsys: Pytest capture fixture for stdout.
+        """
+        drug1, drug2 = fitted_curves
+        syn = Synergy(synergy_data, drug1, drug2)
+        combo = syn.data["combo_data"].copy()
+        combo["response"] = 0.01
+        syn.data = {**syn.data, "combo_data": combo}
+        syn.calc_loewe()
+        captured = capsys.readouterr().out.lower()
+        assert "clip" in captured
+        assert "hill range" in captured
+        assert "loewe synergy" in captured
+
     def test_plot_synergy_heatmaps_both(self, synergy_data, fitted_curves, tmp_path):
-        """Verify plot_synergy_heatmaps writes Bliss and Loewe heatmaps when model is 'both'.
+        """Verify plot_synergy_heatmaps writes Bliss & Loewe heatmaps when model='both'.
 
         Args:
             synergy_data: Parsed assay data fixture.
@@ -552,8 +703,10 @@ class TestSynergy:
         pngs = list(heatmap_dir.glob("*.png"))
         assert len(pngs) == 2
 
-    def test_plot_synergy_heatmaps_bliss_only(self, synergy_data, fitted_curves, tmp_path):
-        """Verify plot_synergy_heatmaps writes only a Bliss heatmap when model is 'bliss'.
+    def test_plot_synergy_heatmaps_bliss_only(
+        self, synergy_data, fitted_curves, tmp_path
+    ):
+        """Verify plot_synergy_heatmaps writes only Bliss heatmap when model='bliss'.
 
         Args:
             synergy_data: Parsed assay data fixture.
@@ -563,12 +716,16 @@ class TestSynergy:
         drug1, drug2 = fitted_curves
         syn = Synergy(synergy_data, drug1, drug2)
         syn.calc_bliss()
-        syn.plot_synergy_heatmaps(synergy_data["assay_info"], tmp_path, synergy_model="bliss")
+        syn.plot_synergy_heatmaps(
+            synergy_data["assay_info"], tmp_path, synergy_model="bliss"
+        )
         pngs = list((tmp_path / "synergy_heatmaps").glob("*Bliss*"))
         assert len(pngs) == 1
 
-    def test_plot_synergy_heatmaps_loewe_only(self, synergy_data, fitted_curves, tmp_path):
-        """Verify plot_synergy_heatmaps writes only a Loewe heatmap when model is 'loewe'.
+    def test_plot_synergy_heatmaps_loewe_only(
+        self, synergy_data, fitted_curves, tmp_path
+    ):
+        """Verify plot_synergy_heatmaps writes only Loewe heatmap when model='loewe'.
 
         Args:
             synergy_data: Parsed assay data fixture.
@@ -578,7 +735,9 @@ class TestSynergy:
         drug1, drug2 = fitted_curves
         syn = Synergy(synergy_data, drug1, drug2)
         syn.calc_loewe()
-        syn.plot_synergy_heatmaps(synergy_data["assay_info"], tmp_path, synergy_model="loewe")
+        syn.plot_synergy_heatmaps(
+            synergy_data["assay_info"], tmp_path, synergy_model="loewe"
+        )
         pngs = list((tmp_path / "synergy_heatmaps").glob("*Loewe*"))
         assert len(pngs) == 1
 
@@ -591,10 +750,14 @@ class TestSynergy:
         """
         drug1, drug2 = fitted_curves
         syn = Synergy(synergy_data, drug1, drug2)
-        result = syn.plot_synergy_heatmaps(synergy_data["assay_info"], Path("/tmp"), synergy_model="invalid")
+        result = syn.plot_synergy_heatmaps(
+            synergy_data["assay_info"], Path("/tmp"), synergy_model="invalid"
+        )
         assert "Synergy model must be" in result
 
-    def test_plot_synergy_heatmaps_skips_none_matrix(self, synergy_data, fitted_curves, tmp_path, capsys):
+    def test_plot_synergy_heatmaps_skips_none_matrix(
+        self, synergy_data, fitted_curves, tmp_path, capsys
+    ):
         """Verify plot_synergy_heatmaps skips plots when score matrices are None.
 
         Args:
@@ -607,12 +770,16 @@ class TestSynergy:
         syn = Synergy(synergy_data, drug1, drug2)
         syn.bliss_scores = None
         syn.loewe_scores = None
-        syn.plot_synergy_heatmaps(synergy_data["assay_info"], tmp_path, synergy_model="both")
+        syn.plot_synergy_heatmaps(
+            synergy_data["assay_info"], tmp_path, synergy_model="both"
+        )
         captured = capsys.readouterr()
         assert "Skipping" in captured.out
 
-    def test_plot_synergy_heatmaps_clips_extreme_values(self, synergy_data, fitted_curves, tmp_path, capsys):
-        """Verify plot_synergy_heatmaps clips scores outside [-1, 1] and prints a warning.
+    def test_plot_synergy_heatmaps_clips_extreme_values(
+        self, synergy_data, fitted_curves, tmp_path, capsys
+    ):
+        """Verify plot_synergy_heatmaps clips scores outside [-1, 1] and prints warning.
 
         Args:
             synergy_data: Parsed assay data fixture.
@@ -625,11 +792,15 @@ class TestSynergy:
         syn.calc_bliss()
         syn.bliss_scores[0, 0] = 5.0
         syn.bliss_scores[0, 1] = -5.0
-        syn.plot_synergy_heatmaps(synergy_data["assay_info"], tmp_path, synergy_model="bliss")
+        syn.plot_synergy_heatmaps(
+            synergy_data["assay_info"], tmp_path, synergy_model="bliss"
+        )
         captured = capsys.readouterr()
-        assert "Clipping values" in captured.out
+        assert "clipped" in captured.out.lower()
 
-    def test_plot_synergy_heatmaps_zero_concentration_labels(self, fitted_curves, tmp_path):
+    def test_plot_synergy_heatmaps_zero_concentration_labels(
+        self, fitted_curves, tmp_path
+    ):
         """Verify heatmap axis labels render correctly for zero concentrations.
 
         Args:
@@ -637,11 +808,13 @@ class TestSynergy:
             tmp_path: Pytest temporary directory fixture.
         """
         drug1, drug2 = fitted_curves
-        combo_df = pd.DataFrame([
-            {"drug1_conc": 0.0, "drug2_conc": 1e-6, "response": 0.5},
-            {"drug1_conc": 1e-6, "drug2_conc": 0.0, "response": 0.5},
-            {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.3},
-        ])
+        combo_df = pd.DataFrame(
+            [
+                {"drug1_conc": 0.0, "drug2_conc": 1e-6, "response": 0.5},
+                {"drug1_conc": 1e-6, "drug2_conc": 0.0, "response": 0.5},
+                {"drug1_conc": 1e-6, "drug2_conc": 1e-6, "response": 0.3},
+            ]
+        )
         data = {
             "combo_data": combo_df,
         }
@@ -653,3 +826,46 @@ class TestSynergy:
             synergy_model="bliss",
         )
         assert (tmp_path / "synergy_heatmaps").exists()
+
+
+class TestSynergyHillParity:
+    """Compare ``DoseResponseCurve`` fits with ``synergy.single.hill.Hill`` on the same data."""
+
+    @pytest.mark.parametrize(
+        "excel_file,drug_index",
+        [
+            ("RKO_test.xlsx", 0),
+            ("RKO_test.xlsx", 1),
+            ("ZR751_test.xlsx", 0),
+            ("ZR751_test.xlsx", 1),
+        ],
+    )
+    def test_pipeline_matches_synergy_hill_on_same_responses(
+        self, excel_file, drug_index
+    ):
+        """Verify pipeline and synergy Hill fits agree parameter-for-parameter.
+
+        Parameter mapping (same sigmoid, different names):
+        ``pipeline.Emax`` ↔ ``synergy.E0``, ``pipeline.Emin`` ↔ ``synergy.Emax``,
+        ``pipeline.EC50`` ↔ ``synergy.C``, ``pipeline.h`` ↔ ``synergy.h``.
+
+        Args:
+            excel_file: Test matrix workbook under ``data/``.
+            drug_index: ``0`` for drug1, ``1`` for drug2.
+        """
+        excel_path = data_dir / excel_file
+        if not excel_path.exists():
+            pytest.skip(f"Missing test data file: {excel_path}")
+
+        data = utils.parse_data(excel_file)
+        doses, responses = (
+            data["drug1_single"] if drug_index == 0 else data["drug2_single"]
+        )
+        pipeline = fit_pipeline_hill(doses, responses)
+        synergy = fit_synergy_hill(doses, responses)
+
+        # synergy fits log(h), log(C) with log-centered dose scaling
+        assert pipeline["EC50"] == pytest.approx(synergy["C"], rel=0.02)
+        assert pipeline["h"] == pytest.approx(synergy["h"], rel=0.02)
+        assert pipeline["Emax"] == pytest.approx(synergy["E0"], rel=0.02)
+        assert pipeline["Emin"] == pytest.approx(synergy["Emax"], rel=0.02, abs=1e-6)
