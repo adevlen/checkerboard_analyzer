@@ -16,6 +16,7 @@ jobs:
 
       - name: Build Docker Image
         run: |
+          cd .devcontainer
           docker build -t checkerboard_container .
 
       - name: Run Test Suite in Container
