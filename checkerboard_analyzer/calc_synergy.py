@@ -87,6 +87,41 @@ class Synergy:
         CI = (drug1_conc_2D / D1) + (drug2_conc_2D / D2)
         self.loewe_scores = 1 - CI  # Loewe synergy score
 
+    @staticmethod
+    def _format_heatmap_annotations(matrix, fmt=".2f"):
+        """
+        Build cell labels for a synergy heatmap, marking NaN scores explicitly.
+
+        Args:
+            matrix: NumPy array containing synergy scores.
+            fmt: specifies how to display floating-point numbers (default = 2 decimal places).
+        
+        Returns:
+            labels: labels to display on synergy heatmap.
+        """
+        labels = np.empty(matrix.shape, dtype=object)
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                value = matrix[i, j]
+                labels[i, j] = "NaN" if np.isnan(value) else f"{value:{fmt}}"
+        return labels
+
+    @staticmethod
+    def _heatmap_display_values(matrix, nan_color=0.0):
+        """Return a copy of matrix with NaN replaced for seaborn color mapping.
+
+        Seaborn skips annotations on masked/NaN cells, so callers should pass this
+        array as heatmap data while supplying labels from the original matrix.
+
+        Args:
+            matrix: NumPy array containing synergy scores.
+            nan_color: specifies color for NaN cells (default=color like score of 0).
+
+        Returns:
+            Copy of matrix with NaN replaced for seaborn color mapping.
+        """
+        return np.where(np.isnan(matrix), nan_color, matrix)
+
     def plot_synergy_heatmaps(self, assay_info, output_dir, synergy_model="both"):
         """
         Plots synergy scores as a heatmap.
@@ -125,19 +160,24 @@ class Synergy:
                 print(f"Skipping {name} plot: matrix has not been calculated yet.")
                 continue
 
-            # print warning that values outside of (-1.0, 1.0) were present and clipped
-            if np.any((matrix > 1.0) | (matrix < -1.0)):
-                matrix = np.clip(matrix, -1.0, 1.0)
+            # clip finite values for display; preserve NaN for undefined Loewe scores
+            plot_matrix = np.array(matrix, dtype=float, copy=True)
+            finite = np.isfinite(plot_matrix)
+            if np.any(finite & ((plot_matrix > 1.0) | (plot_matrix < -1.0))):
+                plot_matrix[finite] = np.clip(plot_matrix[finite], -1.0, 1.0)
                 print(
                     f"Warning: {name} scores clipped to (-1.0, 1.0)."
                 )
 
+            annot_matrix = self._format_heatmap_annotations(plot_matrix)
+            color_matrix = self._heatmap_display_values(plot_matrix)
+
             plt.figure(figsize=(7, 6))
 
             sns.heatmap(
-                matrix,
-                annot=True,  # print synergy score in cell
-                fmt=".2f",
+                color_matrix,
+                annot=annot_matrix,
+                fmt="",
                 cmap="coolwarm",
                 center=0.0,  # color neutral point is zero
                 vmin=-1.0,  # symmetric bounds for color intensity

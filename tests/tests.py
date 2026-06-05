@@ -13,6 +13,7 @@ from checkerboard_analyzer import utils
 
 pytest.importorskip("synergy")
 from synergy.single import Hill
+from synergy.combination import Bliss, Loewe
 
 matplotlib.use("Agg")
 
@@ -224,6 +225,92 @@ def fit_pipeline_hill(doses, responses):
     }
 
 
+def combo_grid_from_data(data):
+    """Pivot combo assay rows to aligned concentration/response grids.
+
+    Args:
+        data: Parsed assay dict from ``parse_data``.
+
+    Returns:
+        Tuple of (drug1 meshgrid, drug2 meshgrid, response matrix, drug1 conc
+        vector, drug2 conc vector).
+    """
+    combo = data["combo_data"].pivot(
+        index="drug2_conc", columns="drug1_conc", values="response"
+    )
+    d1_conc = combo.columns.to_numpy(dtype=float)
+    d2_conc = combo.index.to_numpy(dtype=float)
+    e_matrix = combo.to_numpy(dtype=float)
+    d1_2d, d2_2d = np.meshgrid(d1_conc, d2_conc)
+    return d1_2d, d2_2d, e_matrix, d1_conc, d2_conc
+
+
+def fit_synergy_combination_models(data, e_bounds=(0, 1.2)):
+    """Fit synergy Bliss and Loewe models on the checkerboard grid.
+
+    Doses are flattened from a meshgrid so results align with the pipeline
+    ``Synergy`` class layout (drug2 rows, drug1 columns).
+
+    Args:
+        data: Parsed assay dict from ``parse_data``.
+        e_bounds: Effect bounds passed to ``Hill(E_bounds=...)``.
+
+    Returns:
+        Dict with ``bliss``, ``loewe_ci``, ``h1``, ``h2``, and grid arrays.
+    """
+    doses_1, resps_1 = data["drug1_single"]
+    doses_2, resps_2 = data["drug2_single"]
+    h1 = Hill(E_bounds=e_bounds)
+    h1.fit(np.asarray(doses_1, dtype=float), np.asarray(resps_1, dtype=float))
+    h2 = Hill(E_bounds=e_bounds)
+    h2.fit(np.asarray(doses_2, dtype=float), np.asarray(resps_2, dtype=float))
+    assert h1.is_converged and h2.is_converged
+
+    d1_2d, d2_2d, e_matrix, _, _ = combo_grid_from_data(data)
+    d1_flat = d1_2d.ravel()
+    d2_flat = d2_2d.ravel()
+    e_flat = e_matrix.ravel()
+
+    bliss_model = Bliss(drug1_model=h1, drug2_model=h2)
+    bliss_model.fit(d1_flat, d2_flat, e_flat)
+    loewe_model = Loewe(mode="ci", drug1_model=h1, drug2_model=h2)
+    loewe_model.fit(d1_flat, d2_flat, e_flat)
+
+    shape = e_matrix.shape
+    return {
+        "bliss": bliss_model.synergy.reshape(shape),
+        "loewe_ci": loewe_model.synergy.reshape(shape),
+        "h1": h1,
+        "h2": h2,
+        "d1_2d": d1_2d,
+        "d2_2d": d2_2d,
+        "e_matrix": e_matrix,
+    }
+
+
+def compute_pipeline_synergy_matrices(data):
+    """Run the pipeline Bliss and Loewe calculators on parsed assay data.
+
+    Args:
+        data: Parsed assay dict from ``parse_data``.
+
+    Returns:
+        Tuple of (bliss scores, loewe scores) NumPy arrays.
+    """
+    doses_1, resps_1 = data["drug1_single"]
+    doses_2, resps_2 = data["drug2_single"]
+    drug1 = DoseResponseCurve(doses_1, resps_1)
+    drug1.curve_fit()
+    drug2 = DoseResponseCurve(doses_2, resps_2)
+    drug2.curve_fit()
+    assert drug1.params is not None and drug2.params is not None
+
+    analyzer = Synergy(data, drug1, drug2)
+    analyzer.calc_bliss()
+    analyzer.calc_loewe()
+    return analyzer.bliss_scores, analyzer.loewe_scores
+
+
 @pytest.fixture
 def tmp_data_dir(tmp_path, monkeypatch):
     """Redirect ``utils.data_dir`` to a temporary directory.
@@ -413,15 +500,31 @@ class TestDoseResponseCurve:
         result = curve.inverse_predict(np.array([0.5]))
         assert np.all(result > 0)
 
-    def test_inverse_predict_zero_denominator_branch(self):
-        """Verify inverse_predict handles responses at or near Emin."""
+    def test_inverse_predict_returns_nan_outside_hill_range(self):
+        """Verify inverse_predict returns NaN when response is outside [Emin, Emax]."""
         curve = fit_dose_curve()
         emin = curve.params["Emin"]
-        # Force denominator == 0 path (set response to emin after clip logic)
-        curve.params["h"] = 1.0
-        responses = np.array([emin, 0.5])
+        emax = curve.params["Emax"]
+        responses = np.array([emin, emax, 0.5])
         doses = curve.inverse_predict(responses)
-        assert doses.shape == (2,)
+        assert doses.shape == (3,)
+        assert np.isnan(doses[0])
+        assert np.isnan(doses[1])
+        assert np.isfinite(doses[2])
+        assert doses[2] > 0
+
+    def test_inverse_predict_warns_when_out_of_range(self, capsys):
+        """Verify inverse_predict prints a warning for out-of-range responses.
+
+        Args:
+            capsys: Pytest capture fixture for stdout.
+        """
+        curve = fit_dose_curve()
+        emin = curve.params["Emin"]
+        curve.inverse_predict(np.array([emin - 0.01]))
+        captured = capsys.readouterr().out.lower()
+        assert "nan" in captured
+        assert "hill range" in captured
 
     def test_get_stats_with_replicates(self):
         """Verify get_stats computes mean and standard deviation across replicates."""
@@ -663,7 +766,7 @@ class TestSynergy:
         syn.calc_loewe()
         assert syn.loewe_scores.shape == syn._get_2D_matrices()[2].shape
 
-    def test_calc_loewe_warns_on_clipped_responses(
+    def test_calc_loewe_warns_on_out_of_range_responses(
         self, synergy_data, fitted_curves, capsys
     ):
         """Verify calc_loewe prints a warning when combo E is outside Hill range.
@@ -680,7 +783,7 @@ class TestSynergy:
         syn.data = {**syn.data, "combo_data": combo}
         syn.calc_loewe()
         captured = capsys.readouterr().out.lower()
-        assert "clip" in captured
+        assert "nan" in captured
         assert "hill range" in captured
         assert "loewe synergy" in captured
 
@@ -798,6 +901,68 @@ class TestSynergy:
         captured = capsys.readouterr()
         assert "clipped" in captured.out.lower()
 
+    def test_format_heatmap_annotations_marks_nan(self):
+        """Verify heatmap labels show NaN for undefined synergy scores."""
+        matrix = np.array([[0.12, np.nan], [np.nan, -0.34]])
+        labels = Synergy._format_heatmap_annotations(matrix)
+        assert labels[0, 0] == "0.12"
+        assert labels[0, 1] == "NaN"
+        assert labels[1, 0] == "NaN"
+        assert labels[1, 1] == "-0.34"
+
+    def test_heatmap_display_values_replaces_nan_for_color(self):
+        """Verify NaN scores are mapped to a neutral color value for seaborn."""
+        matrix = np.array([[0.5, np.nan], [np.nan, -0.3]])
+        display = Synergy._heatmap_display_values(matrix)
+        assert display[0, 0] == 0.5
+        assert display[0, 1] == 0.0
+        assert display[1, 0] == 0.0
+        assert display[1, 1] == -0.3
+
+    def test_plot_synergy_heatmaps_annotates_nan(self, tmp_path):
+        """Verify Loewe heatmaps label undefined cells as NaN.
+
+        Args:
+            tmp_path: Pytest temporary directory fixture.
+        """
+        matrix = np.array([[0.2, np.nan], [np.nan, -0.1]])
+        captured = {}
+
+        def capture_heatmap(data, *args, **kwargs):
+            captured["data"] = np.asarray(data)
+            captured["annot"] = kwargs["annot"]
+            return kwargs.get("ax")
+
+        syn = Synergy.__new__(Synergy)
+        syn.data = {
+            "combo_data": pd.DataFrame(
+                {
+                    "drug1_conc": [1.0, 1.0, 2.0, 2.0],
+                    "drug2_conc": [1.0, 2.0, 1.0, 2.0],
+                    "response": [0.5, 0.5, 0.5, 0.5],
+                }
+            )
+        }
+        syn.bliss_scores = None
+        syn.loewe_scores = matrix
+
+        with patch("checkerboard_analyzer.calc_synergy.sns.heatmap", side_effect=capture_heatmap), patch(
+            "checkerboard_analyzer.calc_synergy.plt.savefig"
+        ), patch("checkerboard_analyzer.calc_synergy.plt.figure"):
+            syn.plot_synergy_heatmaps(
+                {
+                    "drug1_name": "DrugA",
+                    "drug2_name": "DrugB",
+                    "conc_units": "μM",
+                },
+                tmp_path,
+                synergy_model="loewe",
+            )
+
+        assert captured["annot"][0, 1] == "NaN"
+        assert captured["annot"][1, 0] == "NaN"
+        assert np.isfinite(captured["data"]).all()
+
     def test_plot_synergy_heatmaps_zero_concentration_labels(
         self, fitted_curves, tmp_path
     ):
@@ -869,3 +1034,69 @@ class TestSynergyHillParity:
         assert pipeline["h"] == pytest.approx(synergy["h"], rel=0.02)
         assert pipeline["Emax"] == pytest.approx(synergy["E0"], rel=0.02)
         assert pipeline["Emin"] == pytest.approx(synergy["Emax"], rel=0.02, abs=1e-6)
+
+
+class TestSynergyMatrixParity:
+    """Compare pipeline synergy matrices with the ``synergy`` package."""
+
+    @pytest.mark.parametrize("excel_file", ["RKO_test.xlsx", "ZR751_test.xlsx"])
+    def test_loewe_matches_synergy_package(self, excel_file):
+        """Verify pipeline Loewe scores match synergy CI on finite cells.
+
+        Pipeline reports ``1 - CI``; synergy ``Loewe(mode='ci')`` returns CI.
+        NaN masks should agree where Hill inversion is undefined.
+
+        Args:
+            excel_file: Test matrix workbook under ``data/``.
+        """
+        excel_path = data_dir / excel_file
+        if not excel_path.exists():
+            pytest.skip(f"Missing test data file: {excel_path}")
+
+        data = utils.parse_data(excel_file)
+        pipe_loewe = compute_pipeline_synergy_matrices(data)[1]
+        pkg = fit_synergy_combination_models(data)
+        pkg_loewe = 1.0 - pkg["loewe_ci"]
+
+        assert np.array_equal(np.isnan(pipe_loewe), np.isnan(pkg_loewe))
+
+        finite = np.isfinite(pipe_loewe) & np.isfinite(pkg_loewe)
+        assert finite.any(), "expected at least one finite Loewe score"
+        np.testing.assert_allclose(
+            pipe_loewe[finite], pkg_loewe[finite], rtol=1e-3, atol=1e-4
+        )
+
+    @pytest.mark.parametrize("excel_file", ["RKO_test.xlsx", "ZR751_test.xlsx"])
+    def test_bliss_matches_synergy_package(self, excel_file):
+        """Verify pipeline Bliss matches the package multiplicative-null definition.
+
+        Pipeline Bliss: ``E_obs - (E1 + E2 - E1*E2)``.
+        Synergy Bliss: ``E1*E2 - E_obs``. These differ by
+        ``E_obs + E1 + E2 - 2*E1*E2``.
+
+        Args:
+            excel_file: Test matrix workbook under ``data/``.
+        """
+        excel_path = data_dir / excel_file
+        if not excel_path.exists():
+            pytest.skip(f"Missing test data file: {excel_path}")
+
+        data = utils.parse_data(excel_file)
+        pipe_bliss = compute_pipeline_synergy_matrices(data)[0]
+        pkg = fit_synergy_combination_models(data)
+
+        e1 = pkg["h1"].E(pkg["d1_2d"])
+        e2 = pkg["h2"].E(pkg["d2_2d"])
+        expected_pipe = pkg["e_matrix"] - e1 - e2 + e1 * e2
+        expected_pkg = pkg["bliss"]
+
+        np.testing.assert_allclose(pipe_bliss, expected_pipe, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            expected_pkg, e1 * e2 - pkg["e_matrix"], rtol=1e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            pipe_bliss + expected_pkg,
+            2.0 * e1 * e2 - e1 - e2,
+            rtol=1e-5,
+            atol=1e-5,
+        )

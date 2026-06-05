@@ -7,17 +7,4 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
-    ipykernel \
-    pandas \
-    numpy \
-    matplotlib \
-    seaborn \
-    ipywidgets \
-    scipy \
-    argparse \
-    openpyxl \ 
-    pytest \
-    black \
-    flake8 \ 
-    synergy
+RUN pip install --no-cache-dir requirements.txt

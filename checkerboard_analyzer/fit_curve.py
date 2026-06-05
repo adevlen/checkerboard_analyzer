@@ -167,34 +167,34 @@ class DoseResponseCurve:
         h = self.params["h"]
 
         # print warning before clipping response values
-        outside = (response < emin) | (response > emax)
+        outside = (response <= emin) | (response >= emax)
         n_out = int(np.sum(outside))
         if n_out > 0:
             name = f" for {label}" if label else ""
             print(
                 f"Warning: {n_out} response(s) outside the fitted Hill range{name} "
-                f"({emin:.4g}–{emax:.4g}); values will be clipped for inversion."
+                f"({emin:.4g}–{emax:.4g}); values will be set to NaN for inversion."
             )
             if label is not None:
-                print("Loewe synergy scores for affected combination cells are extrapolated.")
+                print("Loewe synergy scores for affected combination cells are undefined.")
             else:
-                print("Inferred doses for those values are extrapolated.")
+                print("Inferred doses for those values are undefined.")
 
-        # clip to prevent division-by-zero or negative base calculations
-        buffer = 1e-5
-        safe_y = np.clip(response, emin + buffer, emax - buffer)
+        # if outside [Emin, Emax], set to NaN
+        # otherwise, calculate Hill inverse
+        predicted_doses = np.full(np.shape(response), np.nan, dtype=float)
+        valid = ~outside
 
-        numerator = np.abs(emax - safe_y)
-        denominator = np.abs(safe_y - emin)
-        denominator[denominator == 0] = 1e-8
+        if np.any(valid):
+            y = response[valid]
+            numerator = np.abs(emax - y)
+            denominator = np.abs(y - emin)
+            denominator[denominator == 0] = 1e-8
 
-        second_term = numerator / denominator
+            second_term = numerator / denominator
+            h_val = np.abs(h) or 0.1  # if h==0
 
-        h_val = np.abs(h)
-        if h_val == 0:
-            h_val = 0.1  # prevent zero-slope
-
-        predicted_doses = ec50 * (second_term ** (1.0 / h_val))
+            predicted_doses[valid] = ec50 * (second_term ** (1.0 / h_val))
         return predicted_doses
 
     def get_stats(self):

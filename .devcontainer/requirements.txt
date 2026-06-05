@@ -1,0 +1,13 @@
+ipykernel 
+pandas 
+numpy 
+matplotlib 
+seaborn 
+ipywidgets 
+scipy 
+argparse 
+openpyxl 
+pytest 
+black 
+flake8  
+synergy
