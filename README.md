@@ -93,6 +93,7 @@ Input data should be an Excel workbook with the following structure:
 | cell_line  | Cell line (used for output folder name) |
 | conc_units | Concentration units (i.e. μM)           |
 
+For an example, refer to RKO_test.xlsx or ZR751_test.xlsx in the `data` directory.
 
 #### Assumptions
 * Responses are already normalized
@@ -216,3 +217,23 @@ $$
 * Bliss definition differs from synergy package if cross-comparison is needed
 * Support of multi-combination and multi-cell line experiments is not currently available, but work is ongoing
 * User interface through a web application rather than Python to better support users with limited programming knowledge
+
+## Acknowledgements
+This project uses the following open-source packages:
+* NumPy
+* SciPy
+* Pandas
+* openpyxl
+* synergy
+* Seaborn
+* Matplotlib
+* ipykernel & ipywidgets
+* argparse
+* pytest
+* black & flake8
+
+Single-drug and combination data was obtained from the O'Neil Pan-Cancer Dataset for testing (RKO_test.xlsx & ZR751_test.xlsx in `data/`):
+O’Neil, J., et al. "An Unbiased Oncology Compound Screen to Identify Novel Combination Strategies." *Molecular Cancer Therapeutics* 15.6 (2016): 1155-1162. 
+[Read Paper](https://doi.org/10.1158/1535-7163.mct-15-0843)
+
+Special thanks to my colleagues at Lucy Therapeutics for training me on checkboard assays as well as introducing me to data analysis using the `synergyfinder` and `medianeffect` R packages.
